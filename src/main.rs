@@ -1,11 +1,12 @@
 use std::{
     fs,
     io::Write,
-    process::Child, time::Instant,
+    process::*, time::Instant,
 };
 
 use clap::{Parser, Subcommand};
-use toml::Table;
+use toml::*;
+use anstyle::*;
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -71,29 +72,50 @@ int main() {
         BuildCommand::Build => {
             build();
         }
-        _ => todo!(),
+        // _ => todo!(),
     }
 }
 
+pub struct ColorScheme<'a> {
+    pub progress_good: &'a dyn std::fmt::Display,
+    pub progress_bad: &'a dyn std::fmt::Display,
+    pub progress_project: &'a dyn std::fmt::Display,
+    pub reset: &'a dyn std::fmt::Display,
+}
+
 fn build() {
+    // colorscheme
+    let progress_good = Style::new().fg_color(Some(AnsiColor::Green.bright(true).into())).render();
+    let progress_bad = Style::new().fg_color(Some(AnsiColor::Red.bright(true).into())).render();
+    let progress_project = Style::new().fg_color(Some(AnsiColor::Yellow.bright(true).into())).italic().render();
+    let reset = Reset.render();
+    let color = ColorScheme {
+        progress_good: &progress_good,
+        progress_bad: &progress_bad,
+        progress_project: &progress_project,
+        reset: &reset,
+    };
+
     let config = &std::fs::read_to_string("config.toml")
         .expect("Failed to find or read config file")
         .parse::<Table>()
         .expect("Invalid table.")["package"];
-    let name = config.as_table().expect("invalid table")["name"]
+    let config = config.as_table().expect("invalid table");
+    let name = config["name"]
         .as_str()
         .unwrap();
+    let compiler_name = match config.get("compiler") {
+        Some(v) => v.as_str().unwrap(),
+        None => "g++-13"
+    };
 
-    println!(
-        "[Building project {}]",
-        name
-    );
+    println!("{}Building project {name}{}", color.progress_project, color.reset);
     let mut handles = Vec::new();
     let mut files = Vec::new();
     std::fs::create_dir("obj").unwrap_or(());
     let now = Instant::now();
-    compile("src", config.as_table().unwrap(), &mut handles, &mut files);
-    fn compile(dir: &str, config: &Table, handles: &mut Vec<Child>, files: &mut Vec<String>) {
+    compile("src", config, &compiler_name, &color, &mut handles, &mut files);
+    fn compile<'a>(dir: &str, config: &Table, compiler_name: &str, color: &ColorScheme<'a>, handles: &mut Vec<Child>, files: &mut Vec<String>) {
         std::fs::create_dir(format!("obj/{}", dir)).unwrap_or(());
         for file in fs::read_dir(dir).unwrap() {
             let file = file.unwrap();
@@ -101,11 +123,13 @@ fn build() {
                 compile(
                     &format!("{}", file.path().display()),
                     config,
+                    compiler_name,
+                    color,
                     handles,
                     files,
                 );
             } else {
-                let mut compiler = std::process::Command::new("g++-13");
+                let mut compiler = std::process::Command::new(compiler_name);
                 compiler.arg("-c");
                 let file_name = format!(
                     "./{}/{}",
@@ -125,20 +149,55 @@ fn build() {
                 for lib in config["deps"].as_array().expect("invalid deps arg") {
                     compiler.arg(format!("-l{}", lib.as_str().expect("invalid dep arg")));
                 }
-                handles.push(compiler.spawn().expect("failed to start g++ instance"));
+
+                handles.push(compiler.spawn().expect("failed to start compiler instance"));
+                
+                println!("{}compiling:{} {file_name}", color.progress_good, color.reset);
             }
         }
     }
+
+    let mut errors = 0;
     for mut handle in handles {
-        let _ = handle.wait(); // wait for all compilations to finish
+        if handle_err(handle.wait(), &color) {
+            errors += 1;
+        }
     }
 
-    std::process::Command::new("g++-13")
+    if errors != 0 {
+        println!(
+            "{}error:{} failed to compile project {name} due to {errors} error{}",
+            color.progress_bad,
+            color.reset,
+            if errors != 1 { "s" } else { "" }
+        );
+        exit(1);
+    }
+
+    let r = std::process::Command::new(compiler_name)
         .args(&files)
         .arg(format!("-o{}", name))
         .spawn()
         .expect("Failed to spawn linker process")
-        .wait()
-        .unwrap();
-    println!("Finished compiling in {}s", now.elapsed().as_secs_f64());
+        .wait();
+    if handle_err(r, &color) {
+        exit(2);
+    } else {
+        println!("Finished compiling in {:.02}s", now.elapsed().as_secs_f64());
+    }
+}
+
+fn handle_err<'a>(r: std::io::Result<ExitStatus>, color: &ColorScheme<'a>) -> bool {
+    match r {
+        Ok(ec) => {
+            if !ec.success() {
+                return true;
+            }
+        },
+        Err(e) => {
+            println!("{}error:{} {e:?}", color.progress_bad, color.reset);
+            return true
+        },
+    }
+    false
 }
