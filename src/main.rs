@@ -35,10 +35,13 @@ struct Config {
 #[derive(Serialize, Deserialize)]
 struct Package {
     name: String,
+
     deps: Vec<String>,
-    compiler: Option<String>,
     include_paths: Vec<String>,
     dep_paths: Vec<String>,
+
+    compiler: Option<String>,
+    flags: Vec<String>,
 }
 
 impl Config {
@@ -46,10 +49,13 @@ impl Config {
         Config {
             package: Package {
                 name: name.to_string(),
+
                 deps: vec![],
-                compiler: None,
                 include_paths: vec![],
                 dep_paths: vec![],
+
+                compiler: None,
+                flags: vec![],
             }
         }
     }
@@ -98,9 +104,9 @@ pub struct ColorScheme<'a> {
 
 fn build(config: &Config, args: &Args) {
     // colorscheme
-    let progress_good = Style::new().fg_color(Some(AnsiColor::Green.bright(true).into())).render();
-    let progress_bad = Style::new().fg_color(Some(AnsiColor::Red.bright(true).into())).render();
-    let progress_project = Style::new().fg_color(Some(AnsiColor::Yellow.bright(true).into())).italic().render();
+    let progress_good = Style::new().fg_color(Some(AnsiColor::BrightGreen.into())).bold().render();
+    let progress_bad = Style::new().fg_color(Some(AnsiColor::BrightRed.into())).bold().render();
+    let progress_project = Style::new().fg_color(Some(AnsiColor::BrightYellow.into())).render();
     let reset = Reset.render();
     let color = ColorScheme {
         progress_good: &progress_good,
@@ -161,6 +167,7 @@ fn build(config: &Config, args: &Args) {
                 for lib in config.package.deps.iter() {
                     compiler.arg(format!("-l{}", lib));
                 }
+                compiler.args(&config.package.flags);
 
                 handles.push(compiler.spawn().expect("failed to start compiler instance"));
                 
@@ -203,7 +210,12 @@ fn build(config: &Config, args: &Args) {
     for lib in config.package.deps.iter() {
         linker.arg(format!("-l{}", lib));
     }
+
+    linker.args(&config.package.flags);
+
+    println!("{}linking:{} {name}", color.progress_good, color.reset);
     if args.print_commands { println!("{linker:?}") }
+
     let r = linker.spawn()
         .expect("Failed to spawn linker process")
         .wait();
@@ -211,7 +223,7 @@ fn build(config: &Config, args: &Args) {
     if handle_err(r, &color) {
         exit(2);
     } else {
-        println!("Finished compiling in {:.02}s", now.elapsed().as_secs_f64());
+        println!("{}finished:{} {name} (in {:.02}s)", color.progress_good, color.reset, now.elapsed().as_secs_f64());
     }
 }
 
