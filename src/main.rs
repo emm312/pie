@@ -7,11 +7,15 @@ use std::{
 use clap::{Parser, Subcommand};
 use toml::*;
 use anstyle::*;
+use serde::{Serialize, Deserialize};
 
 #[derive(Parser, Debug)]
 struct Args {
     #[command(subcommand)]
     subcommand: BuildCommand,
+
+    #[arg(long)]
+    print_commands: bool,
 }
 
 #[derive(Subcommand, Clone, Debug)]
@@ -24,6 +28,39 @@ enum BuildCommand {
     },
 }
 
+#[derive(Serialize, Deserialize)]
+struct Config {
+    package: Package
+}
+#[derive(Serialize, Deserialize)]
+struct Package {
+    name: String,
+
+    deps: Vec<String>,
+    include_paths: Vec<String>,
+    dep_paths: Vec<String>,
+
+    compiler: Option<String>,
+    flags: Vec<String>,
+}
+
+impl Config {
+    fn new(name: &str) -> Self {
+        Config {
+            package: Package {
+                name: name.to_string(),
+
+                deps: vec![],
+                include_paths: vec![],
+                dep_paths: vec![],
+
+                compiler: None,
+                flags: vec![],
+            }
+        }
+    }
+}
+
 fn main() {
     let args = Args::parse();
 
@@ -33,19 +70,7 @@ fn main() {
             std::fs::create_dir(format!("{}/src", path)).unwrap();
             std::fs::create_dir(format!("{}/include", path)).unwrap();
 
-            let mut config = std::fs::File::create(format!("{}/config.toml", path)).unwrap();
-            config
-                .write(
-                    format!(
-                        r#"[package]
-name = "{}"
-deps = []
-"#,
-                        path
-                    )
-                    .as_bytes(),
-                )
-                .unwrap();
+            std::fs::write(format!("{}/config.toml", path), to_string(&Config::new(&path)).unwrap()).unwrap();
 
             let mut main = std::fs::File::create(format!("{}/src/main.cpp", path)).unwrap();
             main.write(
@@ -58,19 +83,13 @@ int main() {
             .unwrap();
         }
         BuildCommand::Run => {
-            let config = &std::fs::read_to_string("config.toml")
-                .expect("Failed to find or read config file")
-                .parse::<Table>()
-                .expect("Invalid table.")["package"];
-            let name = config.as_table().expect("invalid table")["name"]
-                .as_str()
-                .unwrap();
-    
-            build();
-            std::process::Command::new(format!("./{}", name)).spawn().unwrap().wait().unwrap();
+            let config = from_str(&std::fs::read_to_string("config.toml").unwrap()).unwrap();
+            build(&config, &args);
+            std::process::Command::new(format!("./{}", config.package.name)).spawn().unwrap().wait().unwrap();
         }
         BuildCommand::Build => {
-            build();
+            let config = from_str(&std::fs::read_to_string("config.toml").unwrap()).unwrap();
+            build(&config, &args);
         }
         // _ => todo!(),
     }
@@ -83,11 +102,11 @@ pub struct ColorScheme<'a> {
     pub reset: &'a dyn std::fmt::Display,
 }
 
-fn build() {
+fn build(config: &Config, args: &Args) {
     // colorscheme
-    let progress_good = Style::new().fg_color(Some(AnsiColor::Green.bright(true).into())).render();
-    let progress_bad = Style::new().fg_color(Some(AnsiColor::Red.bright(true).into())).render();
-    let progress_project = Style::new().fg_color(Some(AnsiColor::Yellow.bright(true).into())).italic().render();
+    let progress_good = Style::new().fg_color(Some(AnsiColor::BrightGreen.into())).bold().render();
+    let progress_bad = Style::new().fg_color(Some(AnsiColor::BrightRed.into())).bold().render();
+    let progress_project = Style::new().fg_color(Some(AnsiColor::BrightYellow.into())).render();
     let reset = Reset.render();
     let color = ColorScheme {
         progress_good: &progress_good,
@@ -96,26 +115,16 @@ fn build() {
         reset: &reset,
     };
 
-    let config = &std::fs::read_to_string("config.toml")
-        .expect("Failed to find or read config file")
-        .parse::<Table>()
-        .expect("Invalid table.")["package"];
-    let config = config.as_table().expect("invalid table");
-    let name = config["name"]
-        .as_str()
-        .unwrap();
-    let compiler_name = match config.get("compiler") {
-        Some(v) => v.as_str().unwrap(),
-        None => "g++-13"
-    };
+    let name = &config.package.name;
+    let compiler_name = config.package.compiler.as_ref().map(|c| c.as_str()).unwrap_or("g++");
 
     println!("{}Building project {name}{}", color.progress_project, color.reset);
     let mut handles = Vec::new();
     let mut files = Vec::new();
     std::fs::create_dir("obj").unwrap_or(());
     let now = Instant::now();
-    compile("src", config, &compiler_name, &color, &mut handles, &mut files);
-    fn compile<'a>(dir: &str, config: &Table, compiler_name: &str, color: &ColorScheme<'a>, handles: &mut Vec<Child>, files: &mut Vec<String>) {
+    compile("src", config, &compiler_name, &color, args, &mut handles, &mut files);
+    fn compile<'a>(dir: &str, config: &Config, compiler_name: &str, color: &ColorScheme<'a>, args: &Args, handles: &mut Vec<Child>, files: &mut Vec<String>) {
         std::fs::create_dir(format!("obj/{}", dir)).unwrap_or(());
         for file in fs::read_dir(dir).unwrap() {
             let file = file.unwrap();
@@ -125,6 +134,7 @@ fn build() {
                     config,
                     compiler_name,
                     color,
+                    args,
                     handles,
                     files,
                 );
@@ -146,13 +156,23 @@ fn build() {
                 files.push(obj_name);
 
                 compiler.arg("-I./include");
-                for lib in config["deps"].as_array().expect("invalid deps arg") {
-                    compiler.arg(format!("-l{}", lib.as_str().expect("invalid dep arg")));
+                for inc_path in config.package.include_paths.iter() {
+                    compiler.arg(format!("-I{}", inc_path));
                 }
+
+                for lib_path in config.package.dep_paths.iter() {
+                    compiler.arg(format!("-L{}", lib_path));
+                }
+
+                for lib in config.package.deps.iter() {
+                    compiler.arg(format!("-l{}", lib));
+                }
+                compiler.args(&config.package.flags);
 
                 handles.push(compiler.spawn().expect("failed to start compiler instance"));
                 
                 println!("{}compiling:{} {file_name}", color.progress_good, color.reset);
+                if args.print_commands { println!("{compiler:?}") }
             }
         }
     }
@@ -174,16 +194,36 @@ fn build() {
         exit(1);
     }
 
-    let r = std::process::Command::new(compiler_name)
-        .args(&files)
-        .arg(format!("-o{}", name))
-        .spawn()
+    let mut linker = std::process::Command::new(compiler_name);
+    linker.args(&files)
+        .arg(format!("-o{}", name));
+
+    linker.arg("-I./include");
+    for inc_path in config.package.include_paths.iter() {
+        linker.arg(format!("-I{}", inc_path));
+    }
+
+    for lib_path in config.package.dep_paths.iter() {
+        linker.arg(format!("-L{}", lib_path));
+    }
+
+    for lib in config.package.deps.iter() {
+        linker.arg(format!("-l{}", lib));
+    }
+
+    linker.args(&config.package.flags);
+
+    println!("{}linking:{} {name}", color.progress_good, color.reset);
+    if args.print_commands { println!("{linker:?}") }
+
+    let r = linker.spawn()
         .expect("Failed to spawn linker process")
         .wait();
+
     if handle_err(r, &color) {
         exit(2);
     } else {
-        println!("Finished compiling in {:.02}s", now.elapsed().as_secs_f64());
+        println!("{}finished:{} {name} (in {:.02}s)", color.progress_good, color.reset, now.elapsed().as_secs_f64());
     }
 }
 
