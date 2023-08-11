@@ -1,13 +1,9 @@
-use std::{
-    fs,
-    io::Write,
-    process::*, time::Instant,
-};
+use std::{fs, io::Write, process::*, time::Instant};
 
-use clap::{Parser, Subcommand};
-use toml::*;
 use anstyle::*;
-use serde::{Serialize, Deserialize};
+use clap::{Parser, Subcommand};
+use serde::{Deserialize, Serialize};
+use toml::*;
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -26,11 +22,12 @@ enum BuildCommand {
         #[arg()]
         path: String,
     },
+    Test,
 }
 
 #[derive(Serialize, Deserialize)]
 struct Config {
-    package: Package
+    package: Package,
 }
 #[derive(Serialize, Deserialize)]
 struct Package {
@@ -56,7 +53,7 @@ impl Config {
 
                 compiler: None,
                 flags: vec![],
-            }
+            },
         }
     }
 }
@@ -69,9 +66,15 @@ fn main() {
             std::fs::create_dir(&path).unwrap();
             std::fs::create_dir(format!("{}/src", path)).unwrap();
             std::fs::create_dir(format!("{}/include", path)).unwrap();
+            std::fs::create_dir(format!("{}/tests", path)).unwrap();
 
-            std::fs::write(format!("{}/config.toml", path), to_string(&Config::new(&path)).unwrap()).unwrap();
+            std::fs::write(
+                format!("{}/config.toml", path),
+                to_string(&Config::new(&path)).unwrap(),
+            )
+            .unwrap();
 
+            let mut tests = std::fs::File::create(format!("{}/tests/tests.hpp", path)).unwrap();
             let mut main = std::fs::File::create(format!("{}/src/main.cpp", path)).unwrap();
             main.write(
                 r#"#include <iostream>
@@ -81,17 +84,35 @@ int main() {
                 .as_bytes(),
             )
             .unwrap();
+
+            tests
+                .write(
+                    r#"#include <functional>
+
+const std::function<bool()> tests[] = {
+
+};"#
+                    .as_bytes(),
+                )
+                .unwrap();
         }
         BuildCommand::Run => {
             let config = from_str(&std::fs::read_to_string("config.toml").unwrap()).unwrap();
-            build(&config, &args);
-            std::process::Command::new(format!("./{}", config.package.name)).spawn().unwrap().wait().unwrap();
+            build(&config, &args, false);
+            std::process::Command::new(format!("./{}", config.package.name))
+                .spawn()
+                .unwrap()
+                .wait()
+                .unwrap();
         }
         BuildCommand::Build => {
             let config = from_str(&std::fs::read_to_string("config.toml").unwrap()).unwrap();
-            build(&config, &args);
+            build(&config, &args, false);
         }
-        // _ => todo!(),
+        BuildCommand::Test => {
+            let config = from_str(&std::fs::read_to_string("config.toml").unwrap()).unwrap();
+            build(&config, &args, true);
+        } // _ => todo!(),
     }
 }
 
@@ -102,11 +123,19 @@ pub struct ColorScheme<'a> {
     pub reset: &'a dyn std::fmt::Display,
 }
 
-fn build(config: &Config, args: &Args) {
+fn build(config: &Config, args: &Args, is_test: bool) {
     // colorscheme
-    let progress_good = Style::new().fg_color(Some(AnsiColor::BrightGreen.into())).bold().render();
-    let progress_bad = Style::new().fg_color(Some(AnsiColor::BrightRed.into())).bold().render();
-    let progress_project = Style::new().fg_color(Some(AnsiColor::BrightYellow.into())).render();
+    let progress_good = Style::new()
+        .fg_color(Some(AnsiColor::BrightGreen.into()))
+        .bold()
+        .render();
+    let progress_bad = Style::new()
+        .fg_color(Some(AnsiColor::BrightRed.into()))
+        .bold()
+        .render();
+    let progress_project = Style::new()
+        .fg_color(Some(AnsiColor::BrightYellow.into()))
+        .render();
     let reset = Reset.render();
     let color = ColorScheme {
         progress_good: &progress_good,
@@ -116,15 +145,39 @@ fn build(config: &Config, args: &Args) {
     };
 
     let name = &config.package.name;
-    let compiler_name = config.package.compiler.as_ref().map(|c| c.as_str()).unwrap_or("g++");
+    let compiler_name = config
+        .package
+        .compiler
+        .as_ref()
+        .map(|c| c.as_str())
+        .unwrap_or("g++");
 
-    println!("{}Building project {name}{}", color.progress_project, color.reset);
+    println!(
+        "{}Building project {name}{}",
+        color.progress_project, color.reset
+    );
     let mut handles = Vec::new();
     let mut files = Vec::new();
     std::fs::create_dir("obj").unwrap_or(());
     let now = Instant::now();
-    compile("src", config, &compiler_name, &color, args, &mut handles, &mut files);
-    fn compile<'a>(dir: &str, config: &Config, compiler_name: &str, color: &ColorScheme<'a>, args: &Args, handles: &mut Vec<Child>, files: &mut Vec<String>) {
+    compile(
+        "src",
+        config,
+        &compiler_name,
+        &color,
+        args,
+        &mut handles,
+        &mut files,
+    );
+    fn compile<'a>(
+        dir: &str,
+        config: &Config,
+        compiler_name: &str,
+        color: &ColorScheme<'a>,
+        args: &Args,
+        handles: &mut Vec<Child>,
+        files: &mut Vec<String>,
+    ) {
         std::fs::create_dir(format!("obj/{}", dir)).unwrap_or(());
         for file in fs::read_dir(dir).unwrap() {
             let file = file.unwrap();
@@ -141,16 +194,9 @@ fn build(config: &Config, args: &Args) {
             } else {
                 let mut compiler = std::process::Command::new(compiler_name);
                 compiler.arg("-c");
-                let file_name = format!(
-                    "./{}/{}",
-                    dir,
-                    file.file_name().into_string().unwrap(),
-                );
+                let file_name = format!("./{}/{}", dir, file.file_name().into_string().unwrap(),);
                 compiler.arg(&file_name);
-                let obj_name = format!(
-                    "./obj/{}.o",
-                    file_name
-                );
+                let obj_name = format!("./obj/{}.o", file_name);
                 compiler.arg(format!("-o{}", obj_name));
 
                 files.push(obj_name);
@@ -170,11 +216,47 @@ fn build(config: &Config, args: &Args) {
                 compiler.args(&config.package.flags);
 
                 handles.push(compiler.spawn().expect("failed to start compiler instance"));
-                
-                println!("{}compiling:{} {file_name}", color.progress_good, color.reset);
-                if args.print_commands { println!("{compiler:?}") }
+
+                println!(
+                    "{}compiling:{} {file_name}",
+                    color.progress_good, color.reset
+                );
+                if args.print_commands {
+                    println!("{compiler:?}")
+                }
             }
         }
+    }
+
+    if is_test {
+        let mut tests_cpp_file = std::fs::File::create("./obj/tests.cpp").unwrap();
+        tests_cpp_file.write(r#"#include "tests.hpp"
+        #include <cassert>
+        #include <iostream>
+        
+        extern "C" int test_main() {
+            for (const std::function<bool()> &test : tests) {
+                std::cout << "Testing " << test.target_type().name() << '\n';
+                assert(test());
+            }
+            return 0;
+        }"#.as_bytes()).unwrap();
+        compile(
+            "tests",
+            config,
+            &compiler_name,
+            &color,
+            args,
+            &mut handles,
+            &mut files,
+        );
+        let mut compiler = Command::new(compiler_name);
+        compiler.arg("obj/tests.cpp");
+        compiler.arg("-oobj/tests.o");
+        compiler.arg("-std=c++11");
+        compiler.arg("-I./tests");
+        compiler.arg("-c");
+        compiler.spawn().unwrap().wait().unwrap();
     }
 
     let mut errors = 0;
@@ -195,8 +277,14 @@ fn build(config: &Config, args: &Args) {
     }
 
     let mut linker = std::process::Command::new(compiler_name);
-    linker.args(&files)
-        .arg(format!("-o{}", name));
+    if is_test {
+        files.push("obj/tests.o".to_string());
+    }
+    if is_test {
+        linker.args(&files).arg(format!("-o{}_tests", name));
+    } else {
+        linker.args(&files).arg(format!("-o{}", name));
+    }
 
     linker.arg("-I./include");
     for inc_path in config.package.include_paths.iter() {
@@ -211,19 +299,37 @@ fn build(config: &Config, args: &Args) {
         linker.arg(format!("-l{}", lib));
     }
 
+    if is_test {
+        linker.arg("-e_test_main");
+    }
+
     linker.args(&config.package.flags);
 
     println!("{}linking:{} {name}", color.progress_good, color.reset);
-    if args.print_commands { println!("{linker:?}") }
+    if args.print_commands {
+        println!("{linker:?}")
+    }
 
-    let r = linker.spawn()
+    let r = linker
+        .spawn()
         .expect("Failed to spawn linker process")
         .wait();
 
     if handle_err(r, &color) {
         exit(2);
     } else {
-        println!("{}finished:{} {name} (in {:.02}s)", color.progress_good, color.reset, now.elapsed().as_secs_f64());
+        println!(
+            "{}finished:{} {name} (in {:.02}s)",
+            color.progress_good,
+            color.reset,
+            now.elapsed().as_secs_f64()
+        );
+    }
+
+    if is_test {
+        println!("{}running tests...{}", color.progress_good, color.reset);
+        Command::new(format!("./{}_tests", name)).spawn().unwrap().wait().unwrap();
+        println!("{}finished!{}", color.progress_good, color.reset);
     }
 }
 
@@ -233,11 +339,11 @@ fn handle_err<'a>(r: std::io::Result<ExitStatus>, color: &ColorScheme<'a>) -> bo
             if !ec.success() {
                 return true;
             }
-        },
+        }
         Err(e) => {
             println!("{}error:{} {e:?}", color.progress_bad, color.reset);
-            return true
-        },
+            return true;
+        }
     }
     false
 }
